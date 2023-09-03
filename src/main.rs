@@ -17,6 +17,11 @@ use swadloon::{
     ChapterEntry,
 };
 
+#[derive(Serialize, Deserialize, Debug)]
+struct Mangapill {
+    id: usize,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Chapter {
     index: usize,
@@ -162,17 +167,9 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Fetch {
-        #[arg(short, long, value_name = "ID")]
-        mal_id: usize,
+    Fetch,
 
-        #[arg(short = 'p', long, value_name = "ID")]
-        mangapill_id: usize,
-    },
-
-    Search {
-        query: String,
-    },
+    AddManga { query: String },
 }
 
 fn user_pick_anilist(
@@ -243,11 +240,7 @@ fn user_pick_manga(list: &[SearchResult]) -> &SearchResult {
     result
 }
 
-fn fetch(
-    mal_id: usize,
-    mangapill_id: usize,
-    fetch_anilist: bool,
-) -> (Option<Metadata>, Manga) {
+fn fetch_mangapill(mangapill_id: usize) -> Manga {
     // let mut manga_dir = base.as_ref().to_path_buf();
     // manga_dir.push(mal_id.to_string());
     //
@@ -263,23 +256,14 @@ fn fetch(
     //     std::fs::create_dir_all(&manga_dir).unwrap();
     // }
 
-    // TODO(patrik): Check if anilist and malid matches
-    // TODO(patrik): Refetch if user picks it
-    let metadata = if fetch_anilist {
-        println!("Fetching anilist metadata (MAL Id: {})", mal_id);
-        Some(fetch_anilist_metadata(mal_id))
-    } else {
-        println!("Skipping fetching anilist metadata");
-        None
-    };
-
     println!("Fetching manga: {}", mangapill_id);
-    let mut manga = fetch_manga(mangapill_id);
-    for chapter in manga.chapters.iter_mut() {
-        println!("Fetching chapter: {}", chapter.index);
-        fetch_chapter_data(chapter);
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let manga = fetch_manga(mangapill_id);
+
+    // for chapter in manga.chapters.iter_mut() {
+    //     println!("Fetching chapter: {}", chapter.index);
+    //     fetch_chapter_data(chapter);
+    //     std::thread::sleep(Duration::from_millis(50));
+    // }
 
     // if mangapill_file.is_file() {
     //     let s = std::fs::read_to_string(&mangapill_file).unwrap();
@@ -302,7 +286,7 @@ fn fetch(
     // let s = serde_json::to_string_pretty(&manga).unwrap();
     // write_to_file(mangapill_file, &s);
 
-    (metadata, manga)
+    manga
 }
 
 struct ThreadJob {
@@ -350,19 +334,30 @@ fn thread_worker(tid: usize, queue: Arc<Mutex<VecDeque<ThreadJob>>>) {
     }
 }
 
-fn fetch_chapters(paths: &Paths, manga: &Manga, missing_chapters: &[usize]) {
+fn fetch_chapters(
+    paths: &Paths,
+    manga: &mut Manga,
+    missing_chapters: &[usize],
+) {
     if !paths.chapters_dir.is_dir() {
         std::fs::create_dir_all(&paths.chapters_dir).unwrap();
     }
 
     let mut thread_jobs = VecDeque::new();
     for &chapter_index in missing_chapters {
-        let chapter = manga.chapters.iter().find(|i| i.index == chapter_index);
+        let chapter =
+            manga.chapters.iter_mut().find(|i| i.index == chapter_index);
 
-        if let Some(chapter) = chapter {
+        if let Some(mut chapter) = chapter {
             let mut chapter_dest = paths.chapters_dir.clone();
             chapter_dest.push(chapter.index.to_string());
             std::fs::create_dir_all(&chapter_dest).unwrap();
+
+            if chapter.pages.is_none() {
+                println!("Fetching {}", chapter.index);
+                fetch_chapter_data(&mut chapter);
+                std::thread::sleep(Duration::from_millis(50));
+            }
 
             let pages = chapter.pages.as_ref().unwrap();
             for (index, page) in pages.iter().enumerate() {
@@ -411,10 +406,7 @@ struct Paths {
     chapters_metadata: PathBuf,
 }
 
-fn create_paths(base: &PathBuf, mal_id: usize) -> Paths {
-    let mut manga_dir = base.clone();
-    manga_dir.push(mal_id.to_string());
-
+fn create_paths(manga_dir: &PathBuf) -> Paths {
     let mut metadata_file = manga_dir.clone();
     metadata_file.push("metadata.json");
 
@@ -442,75 +434,110 @@ fn main() {
     };
 
     match args.command {
-        Commands::Fetch {
-            mal_id,
-            mangapill_id,
-        } => {
-            let paths = create_paths(&base, mal_id);
-            let (metadata, manga) =
-                fetch(mal_id, mangapill_id, !paths.metadata_file.is_file());
+        Commands::Fetch => {
+            for path in base.read_dir().unwrap() {
+                let path = path.unwrap();
+                let path = path.path();
 
-            if let Some(metadata) = metadata {
-                let s = serde_json::to_string_pretty(&metadata).unwrap();
-                write_to_file(&paths.metadata_file, &s);
-            }
+                let mut mangapill_file = path.clone();
+                mangapill_file.push("mangapill.json");
 
-            let mut chapters = Vec::new();
+                if !mangapill_file.is_file() {
+                    continue;
+                }
 
-            if paths.chapters_dir.is_dir() {
-                for chapter in paths.chapters_dir.read_dir().unwrap() {
-                    let chapter = chapter.unwrap();
-                    let chapter = chapter.path();
+                let s = std::fs::read_to_string(&mangapill_file).unwrap();
+                let mangapill = serde_json::from_str::<Mangapill>(&s).unwrap();
 
-                    let index = chapter
-                        .file_stem()
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .parse::<usize>()
+                println!("Fetch {:?}", path);
+                let paths = create_paths(&path);
+
+                let mut manga = fetch_mangapill(mangapill.id);
+
+                let missing_chapters = if paths.chapters_metadata.is_file() {
+                    let s = std::fs::read_to_string(&paths.chapters_metadata)
                         .unwrap();
+                    let chapters =
+                        serde_json::from_str::<Vec<ChapterEntry>>(&s).unwrap();
 
-                    chapters.push((index, chapter));
+                    let mut missing = Vec::new();
+                    for chapter in manga.chapters.iter() {
+                        let res =
+                            chapters.iter().find(|i| i.index == chapter.index);
+                        if res.is_none() {
+                            missing.push(chapter.index);
+                        }
+                    }
+
+                    for missing in missing.iter() {
+                        let mut path = paths.chapters_dir.clone();
+                        path.push(missing.to_string());
+
+                        if path.is_dir() {
+                            panic!("Chapter '{}' is not declared in 'chapters.json' but exists as an directory", missing);
+                        }
+                    }
+
+                    missing
+                } else {
+                    manga.chapters.iter().map(|i| i.index).collect::<Vec<_>>()
+                };
+
+                println!("Missing: {:?}", missing_chapters);
+                fetch_chapters(&paths, &mut manga, &missing_chapters);
+
+                let mut chapters = Vec::new();
+
+                for chapter in manga.chapters.iter() {
+                    chapters.push(ChapterEntry {
+                        index: chapter.index,
+                        name: chapter.name.clone(),
+                        page_count: chapter
+                            .pages
+                            .as_ref()
+                            .map(|i| i.len())
+                            .unwrap_or(0),
+                    });
                 }
+
+                let s = serde_json::to_string_pretty(&chapters).unwrap();
+                write_to_file(&paths.chapters_metadata, &s);
             }
-
-            let mut missing_chapters = Vec::new();
-
-            for chapter in manga.chapters.iter() {
-                let res = chapters.iter().find(|i| i.0 == chapter.index);
-                if res.is_none() {
-                    missing_chapters.push(chapter.index);
-                }
-            }
-
-            println!("Chapters to fetch: {}", missing_chapters.len());
-            fetch_chapters(&paths, &manga, &missing_chapters);
-
-            let mut chapters = Vec::new();
-
-            for chapter in manga.chapters.iter() {
-                chapters.push(ChapterEntry {
-                    index: chapter.index,
-                    name: chapter.name.clone(),
-                    page_count: chapter.pages.as_ref().map(|i| i.len()).unwrap_or(0),
-                });
-            }
-
-            let s = serde_json::to_string_pretty(&chapters).unwrap();
-            write_to_file(&paths.chapters_metadata, &s);
-
         }
 
-        Commands::Search { query } => {
+        Commands::AddManga { query } => {
             // TODO(patrik): Filter out results where malId == null
-            // let results = anilist::query(&query);
-            // let anilist = user_pick_anilist(&results);
-            //
-            // let results = search(&query);
-            // let manga = user_pick_manga(&results);
-            //
-            // let manga = fetch(&base, anilist.mal_id.unwrap(), manga.id);
-            // download(&base, &manga);
+            let results = anilist::query(&query);
+            let anilist = user_pick_anilist(&results);
+
+            let results = search(&query);
+            let manga = user_pick_manga(&results);
+
+            let name = sanitize_name(&manga.name);
+
+            let mut dir = base.clone();
+            dir.push(name);
+
+            assert!(!dir.exists(), "Directory already exists: {:?}", dir);
+
+            if !dir.is_dir() {
+                std::fs::create_dir_all(&dir).unwrap();
+            }
+
+            let mut metadata_file = dir.clone();
+            metadata_file.push("metadata.json");
+
+            let mut mangapill_file = dir.clone();
+            mangapill_file.push("mangapill.json");
+
+            let metadata = fetch_anilist_metadata(anilist.mal_id.unwrap());
+            let s = serde_json::to_string_pretty(&metadata).unwrap();
+            write_to_file(&metadata_file, &s);
+
+            let mangapill = Mangapill { id: manga.id };
+
+            let s = serde_json::to_string_pretty(&mangapill).unwrap();
+            write_to_file(&mangapill_file, &s);
         }
     }
 }
