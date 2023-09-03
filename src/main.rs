@@ -169,7 +169,10 @@ struct Args {
 enum Commands {
     Fetch,
 
-    AddManga { query: String },
+    AddManga {
+        query: String,
+        override_dir: Option<PathBuf>,
+    },
 }
 
 fn user_pick_anilist(
@@ -500,7 +503,10 @@ fn main() {
             }
         }
 
-        Commands::AddManga { query } => {
+        Commands::AddManga {
+            query,
+            override_dir,
+        } => {
             // TODO(patrik): Filter out results where malId == null
             let results = anilist::query(&query);
             let anilist = user_pick_anilist(&results);
@@ -510,14 +516,25 @@ fn main() {
 
             let name = sanitize_name(&manga.name);
 
-            let mut dir = base.clone();
-            dir.push(name);
+            let dir = if let Some(override_dir) = override_dir {
+                assert!(
+                    !override_dir.exists(),
+                    "Directory doesn't exist: {:?}",
+                    override_dir
+                );
+                override_dir
+            } else {
+                let mut dir = base.clone();
+                dir.push(name);
 
-            assert!(!dir.exists(), "Directory already exists: {:?}", dir);
+                assert!(!dir.exists(), "Directory already exists: {:?}", dir);
 
-            if !dir.is_dir() {
-                std::fs::create_dir_all(&dir).unwrap();
-            }
+                if !dir.is_dir() {
+                    std::fs::create_dir_all(&dir).unwrap();
+                }
+
+                dir
+            };
 
             let mut metadata_file = dir.clone();
             metadata_file.push("metadata.json");
