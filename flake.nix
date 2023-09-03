@@ -28,7 +28,7 @@
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           cargoLock.outputHashes = {
-            "swadloon-0.1.0" = "sha256-YEJwTfDFWVmNOwPHAU4rgAIdV3jSjWfVy1L8yS4hJ/c=";
+            "swadloon-0.1.0" = "sha256-J6pwIYdxkACrT0CpcTb2aCzfAdDhv1QCwCwDo7WWNQc=";
           };
 
           buildInputs = [
