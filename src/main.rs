@@ -425,7 +425,7 @@ fn main() {
     let base = if let Some(dir) = args.dir {
         dir
     } else {
-        PathBuf::new()
+        std::env::current_dir().unwrap()
     };
 
     match args.command {
