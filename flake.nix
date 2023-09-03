@@ -27,6 +27,9 @@
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
+          cargoLock.outputHashes = {
+            "swadloon-0.1.0" = "sha256-YEJwTfDFWVmNOwPHAU4rgAIdV3jSjWfVy1L8yS4hJ/c=";
+          };
 
           buildInputs = [
             pkgs.openssl
