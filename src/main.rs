@@ -13,7 +13,7 @@ use reqwest::blocking::Client;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use swadloon::{
-    anilist::{self, fetch_anilist_metadata, Metadata},
+    anilist::{self, fetch_anilist_metadata},
     ChapterEntry,
 };
 
@@ -401,15 +401,11 @@ fn fetch_chapters(
 }
 
 struct Paths {
-    metadata_file: PathBuf,
     chapters_dir: PathBuf,
     chapters_metadata: PathBuf,
 }
 
 fn create_paths(manga_dir: &PathBuf) -> Paths {
-    let mut metadata_file = manga_dir.clone();
-    metadata_file.push("metadata.json");
-
     let mut chapters_dir = manga_dir.clone();
     chapters_dir.push("chapters");
 
@@ -417,7 +413,6 @@ fn create_paths(manga_dir: &PathBuf) -> Paths {
     chapters_metadata.push("chapters.json");
 
     Paths {
-        metadata_file,
         chapters_dir,
         chapters_metadata,
     }
