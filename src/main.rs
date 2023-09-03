@@ -1,17 +1,21 @@
 use std::{
+    collections::VecDeque,
     fs::File,
     io::Write,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
-use chrono::DateTime;
 use clap::{Parser, Subcommand};
 use regex::Regex;
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use swadloon::{
+    anilist::{self, fetch_anilist_metadata, Metadata},
+    ChapterEntry,
+};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Chapter {
@@ -42,7 +46,10 @@ struct SearchResult {
 fn search(query: &str) -> Vec<SearchResult> {
     // let s = std::fs::read_to_string("search.html").unwrap();
     let query = urlencoding::encode(query);
-    let s = fetch_html(&format!("https://mangapill.com/search?q={}&type=manga&status=", query));
+    let s = fetch_html(&format!(
+        "https://mangapill.com/search?q={}&type=manga&status=",
+        query
+    ));
     let document = Html::parse_document(&s);
 
     let selector = Selector::parse("body > div.container.py-3 > div.my-3.grid.justify-end.gap-3.grid-cols-2.md\\:grid-cols-3.lg\\:grid-cols-5 > div").unwrap();
@@ -118,158 +125,6 @@ fn fetch_chapter_data(chapter: &mut Chapter) {
     chapter.pages = Some(pages);
 }
 
-// NOTE(patrik): https://anilist.co/graphiql
-const MANGA_QUERY: &str = "
-query ($id: Int) {
-  Media(idMal: $id) {
-    id
-    description(asHtml: true)
-    type
-    format
-    status(version: 2)
-    genres
-    title {
-      romaji
-      english
-      native
-    }
-    volumes
-    chapters
-    coverImage {
-      medium
-      extraLarge
-      large
-      color
-    }
-    bannerImage
-    startDate {
-      year
-      month
-      day
-    }
-    endDate {
-      year
-      month
-      day
-    }
-  }
-}
-";
-
-const SEARCH_QUERY: &str = "
-query ($query: String) {
-  Page(page: 1, perPage: 15) {
-    media(search: $query, type: MANGA) {
-      id
-      idMal
-      title {
-        romaji
-        english
-        native
-      }
-    }
-  }
-}
-";
-
-fn fetch_anilist_metadata(mal_id: usize) -> serde_json::Value {
-    let client = Client::new();
-
-    let json = json!({
-        "query": MANGA_QUERY,
-        "variables": {
-            "id": mal_id
-        }
-    });
-
-    let res = client
-        .post("https://graphql.anilist.co/")
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .body(json.to_string())
-        .send()
-        .unwrap();
-
-    let headers = res.headers();
-    println!("Headers: {:#?}", headers);
-
-    let date = headers.get("date").unwrap();
-    let date = date.to_str().unwrap();
-    let date = DateTime::parse_from_rfc2822(date).unwrap();
-    println!("Date: {:?}", date);
-
-    let limit = headers.get("x-ratelimit-limit").unwrap();
-    let limit = limit.to_str().unwrap();
-    let limit = limit.parse::<usize>().unwrap();
-    println!("Limit: {}", limit);
-
-    let remaining = headers.get("x-ratelimit-remaining").unwrap();
-    let remaining = remaining.to_str().unwrap();
-    let remaining = remaining.parse::<usize>().unwrap();
-    println!("Remaining: {}", remaining);
-
-    if !res.status().is_success() {
-        panic!("Request Error");
-    }
-
-    let j = res.json::<serde_json::Value>().unwrap();
-
-    j.get("data").unwrap().get("Media").unwrap().clone()
-}
-
-fn search_anilist(query: &str) -> Vec<serde_json::Value> {
-    let client = Client::new();
-
-    let json = json!({
-        "query": SEARCH_QUERY,
-        "variables": {
-            "query": query
-        }
-    });
-
-    let res = client
-        .post("https://graphql.anilist.co/")
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .body(json.to_string())
-        .send()
-        .unwrap();
-
-    let headers = res.headers();
-    println!("Headers: {:#?}", headers);
-
-    let date = headers.get("date").unwrap();
-    let date = date.to_str().unwrap();
-    let date = DateTime::parse_from_rfc2822(date).unwrap();
-    println!("Date: {:?}", date);
-
-    let limit = headers.get("x-ratelimit-limit").unwrap();
-    let limit = limit.to_str().unwrap();
-    let limit = limit.parse::<usize>().unwrap();
-    println!("Limit: {}", limit);
-
-    let remaining = headers.get("x-ratelimit-remaining").unwrap();
-    let remaining = remaining.to_str().unwrap();
-    let remaining = remaining.parse::<usize>().unwrap();
-    println!("Remaining: {}", remaining);
-
-    if !res.status().is_success() {
-        panic!("Request Error");
-    }
-
-    let j = res.json::<serde_json::Value>().unwrap();
-
-    j.get("data")
-        .unwrap()
-        .get("Page")
-        .unwrap()
-        .get("media")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .clone()
-}
-
 fn write_to_file<P>(filepath: P, content: &str)
 where
     P: AsRef<Path>,
@@ -314,36 +169,48 @@ enum Commands {
         #[arg(short = 'p', long, value_name = "ID")]
         mangapill_id: usize,
     },
+
     Search {
         query: String,
     },
 }
 
-fn user_pick_anilist(list: &[serde_json::Value]) -> &serde_json::Value {
+fn user_pick_anilist(
+    list: &[anilist::SearchResult],
+) -> &anilist::SearchResult {
     for (index, result) in list.iter().enumerate() {
         print!("{:2} ", index + 1);
 
-        let title = result.get("title").unwrap();
-        if let Some(english) = title.get("english") {
-            if !english.is_null() {
-                let title = english.as_str().unwrap();
-                print!("{} - ", title);
-            }
-        }
+        print!(
+            "{} ",
+            result
+                .title
+                .english
+                .as_ref()
+                .unwrap_or(&result.title.romaji)
+        );
 
-        if let Some(romaji) = title.get("romaji") {
-            if !romaji.is_null() {
-                let title = romaji.as_str().unwrap();
-                print!("{} - ", title);
-            }
-        }
-
-        if let Some(native) = title.get("native") {
-            if !native.is_null() {
-                let title = native.as_str().unwrap();
-                print!("{} ", title);
-            }
-        }
+        // let title = result.get("title").unwrap();
+        // if let Some(english) = title.get("english") {
+        //     if !english.is_null() {
+        //         let title = english.as_str().unwrap();
+        //         print!("{} - ", title);
+        //     }
+        // }
+        //
+        // if let Some(romaji) = title.get("romaji") {
+        //     if !romaji.is_null() {
+        //         let title = romaji.as_str().unwrap();
+        //         print!("{} - ", title);
+        //     }
+        // }
+        //
+        // if let Some(native) = title.get("native") {
+        //     if !native.is_null() {
+        //         let title = native.as_str().unwrap();
+        //         print!("{} ", title);
+        //     }
+        // }
         println!();
     }
 
@@ -376,29 +243,35 @@ fn user_pick_manga(list: &[SearchResult]) -> &SearchResult {
     result
 }
 
-fn fetch<P>(base: P, mal_id: usize, mangapill_id: usize)
-where
-    P: AsRef<Path>,
-{
-    let mut manga_dir = base.as_ref().to_path_buf();
-    manga_dir.push(mal_id.to_string());
+fn fetch(
+    mal_id: usize,
+    mangapill_id: usize,
+    fetch_anilist: bool,
+) -> (Option<Metadata>, Manga) {
+    // let mut manga_dir = base.as_ref().to_path_buf();
+    // manga_dir.push(mal_id.to_string());
+    //
+    // let mut mangapill_file = manga_dir.clone();
+    // mangapill_file.push("mangapill.json");
+    //
+    // let mut metadata_file = manga_dir.clone();
+    // metadata_file.push("metadata.json");
+    //
+    // if manga_dir.exists() && !manga_dir.is_dir() {
+    //     panic!("'{}' already exists on the filesystem", mal_id);
+    // } else {
+    //     std::fs::create_dir_all(&manga_dir).unwrap();
+    // }
 
-    let mut chapters_file = manga_dir.clone();
-    chapters_file.push("chapters.json");
-
-    let mut metadata_file = manga_dir.clone();
-    metadata_file.push("metadata.json");
-
-    if manga_dir.exists() && !manga_dir.is_dir() {
-        panic!("'{}' already exists on the filesystem", mal_id);
+    // TODO(patrik): Check if anilist and malid matches
+    // TODO(patrik): Refetch if user picks it
+    let metadata = if fetch_anilist {
+        println!("Fetching anilist metadata (MAL Id: {})", mal_id);
+        Some(fetch_anilist_metadata(mal_id))
     } else {
-        std::fs::create_dir_all(&manga_dir).unwrap();
-    }
-
-    println!("Fetching anilist metadata (MAL Id: {})", mal_id);
-    let metadata = fetch_anilist_metadata(mal_id);
-    let s = serde_json::to_string_pretty(&metadata).unwrap();
-    write_to_file(metadata_file, &s);
+        println!("Skipping fetching anilist metadata");
+        None
+    };
 
     println!("Fetching manga: {}", mangapill_id);
     let mut manga = fetch_manga(mangapill_id);
@@ -408,8 +281,154 @@ where
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let s = serde_json::to_string_pretty(&manga.chapters).unwrap();
-    write_to_file(chapters_file, &s);
+    // if mangapill_file.is_file() {
+    //     let s = std::fs::read_to_string(&mangapill_file).unwrap();
+    //     let current = serde_json::from_str::<Manga>(&s).unwrap();
+    //     println!("Original: {:#?}", current);
+    //
+    //     if current.chapters.len() != manga.chapters.len() {
+    //         let mut missing_chapters = Vec::new();
+    //         for chapter in manga.chapters.iter() {
+    //             let res = current.chapters.iter().find(|i| i.index == chapter.index);
+    //             if res.is_none() {
+    //                 missing_chapters.push(chapter.index);
+    //             }
+    //         }
+    //
+    //         println!("Missing Chapters: {:#?}", missing_chapters);
+    //     }
+    // }
+
+    // let s = serde_json::to_string_pretty(&manga).unwrap();
+    // write_to_file(mangapill_file, &s);
+
+    (metadata, manga)
+}
+
+struct ThreadJob {
+    referer: String,
+    url: String,
+    dest: PathBuf,
+}
+
+fn thread_worker(tid: usize, queue: Arc<Mutex<VecDeque<ThreadJob>>>) {
+    let client = Client::new();
+
+    'work_loop: loop {
+        let mut work = {
+            let mut lock = queue.lock().unwrap();
+            if let Some(job) = lock.pop_front() {
+                job
+            } else {
+                break 'work_loop;
+            }
+        };
+
+        println!("{} working on '{}'", tid, work.url);
+
+        let mut res = client
+            .get(work.url)
+            .header("Referer", &work.referer)
+            .send()
+            .unwrap();
+        if !res.status().is_success() {
+            // TODO(patrik): Add error queue
+            panic!("Failed to download");
+        }
+
+        let content_type =
+            res.headers().get("content-type").unwrap().to_str().unwrap();
+        let ext = match content_type {
+            "image/jpeg" => "jpeg",
+            "image/png" => "png",
+            _ => panic!("Unknown Content-Type '{}'", content_type),
+        };
+
+        work.dest.set_extension(ext);
+        let mut file = File::create(&work.dest).unwrap();
+        res.copy_to(&mut file).unwrap();
+    }
+}
+
+fn fetch_chapters(paths: &Paths, manga: &Manga, missing_chapters: &[usize]) {
+    if !paths.chapters_dir.is_dir() {
+        std::fs::create_dir_all(&paths.chapters_dir).unwrap();
+    }
+
+    let mut thread_jobs = VecDeque::new();
+    for &chapter_index in missing_chapters {
+        let chapter = manga.chapters.iter().find(|i| i.index == chapter_index);
+
+        if let Some(chapter) = chapter {
+            let mut chapter_dest = paths.chapters_dir.clone();
+            chapter_dest.push(chapter.index.to_string());
+            std::fs::create_dir_all(&chapter_dest).unwrap();
+
+            let pages = chapter.pages.as_ref().unwrap();
+            for (index, page) in pages.iter().enumerate() {
+                std::io::stdout().flush().unwrap();
+
+                let mut filepath = chapter_dest.clone();
+                filepath.push(index.to_string());
+
+                thread_jobs.push_back(ThreadJob {
+                    referer: chapter.url.clone(),
+                    url: page.clone(),
+                    dest: filepath,
+                });
+            }
+        } else {
+            println!("Unkown chapter index: {}", chapter_index);
+        }
+    }
+
+    println!("Thread Jobs: {}", thread_jobs.len());
+
+    let queue = Arc::new(Mutex::new(thread_jobs));
+
+    const THREAD_COUNT: usize = 4;
+
+    let mut threads = Vec::new();
+
+    for tid in 0..THREAD_COUNT {
+        let queue_handle = queue.clone();
+        let handle = std::thread::spawn(move || {
+            thread_worker(tid, queue_handle);
+        });
+
+        threads.push(handle);
+    }
+
+    for (index, handle) in threads.into_iter().enumerate() {
+        handle.join().unwrap();
+        println!("{} finished", index);
+    }
+}
+
+struct Paths {
+    metadata_file: PathBuf,
+    chapters_dir: PathBuf,
+    chapters_metadata: PathBuf,
+}
+
+fn create_paths(base: &PathBuf, mal_id: usize) -> Paths {
+    let mut manga_dir = base.clone();
+    manga_dir.push(mal_id.to_string());
+
+    let mut metadata_file = manga_dir.clone();
+    metadata_file.push("metadata.json");
+
+    let mut chapters_dir = manga_dir.clone();
+    chapters_dir.push("chapters");
+
+    let mut chapters_metadata = manga_dir.clone();
+    chapters_metadata.push("chapters.json");
+
+    Paths {
+        metadata_file,
+        chapters_dir,
+        chapters_metadata,
+    }
 }
 
 fn main() {
@@ -427,20 +446,71 @@ fn main() {
             mal_id,
             mangapill_id,
         } => {
-            fetch(base, mal_id, mangapill_id);
+            let paths = create_paths(&base, mal_id);
+            let (metadata, manga) =
+                fetch(mal_id, mangapill_id, !paths.metadata_file.is_file());
+
+            if let Some(metadata) = metadata {
+                let s = serde_json::to_string_pretty(&metadata).unwrap();
+                write_to_file(&paths.metadata_file, &s);
+            }
+
+            let mut chapters = Vec::new();
+
+            if paths.chapters_dir.is_dir() {
+                for chapter in paths.chapters_dir.read_dir().unwrap() {
+                    let chapter = chapter.unwrap();
+                    let chapter = chapter.path();
+
+                    let index = chapter
+                        .file_stem()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap();
+
+                    chapters.push((index, chapter));
+                }
+            }
+
+            let mut missing_chapters = Vec::new();
+
+            for chapter in manga.chapters.iter() {
+                let res = chapters.iter().find(|i| i.0 == chapter.index);
+                if res.is_none() {
+                    missing_chapters.push(chapter.index);
+                }
+            }
+
+            println!("Chapters to fetch: {}", missing_chapters.len());
+            fetch_chapters(&paths, &manga, &missing_chapters);
+
+            let mut chapters = Vec::new();
+
+            for chapter in manga.chapters.iter() {
+                chapters.push(ChapterEntry {
+                    index: chapter.index,
+                    name: chapter.name.clone(),
+                    page_count: chapter.pages.as_ref().map(|i| i.len()).unwrap_or(0),
+                });
+            }
+
+            let s = serde_json::to_string_pretty(&chapters).unwrap();
+            write_to_file(&paths.chapters_metadata, &s);
+
         }
 
         Commands::Search { query } => {
             // TODO(patrik): Filter out results where malId == null
-            let results = search_anilist(&query);
-            let anilist = user_pick_anilist(&results);
-            let mal_id = anilist.get("idMal").unwrap().as_u64().unwrap();
-            let mal_id = mal_id as usize;
-
-            let results = search(&query);
-            let manga = user_pick_manga(&results);
-
-            fetch(base, mal_id, manga.id);
+            // let results = anilist::query(&query);
+            // let anilist = user_pick_anilist(&results);
+            //
+            // let results = search(&query);
+            // let manga = user_pick_manga(&results);
+            //
+            // let manga = fetch(&base, anilist.mal_id.unwrap(), manga.id);
+            // download(&base, &manga);
         }
     }
 }
