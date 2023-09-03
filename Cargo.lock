@@ -1348,7 +1348,7 @@ checksum = "73473c0e59e6d5812c5dfe2a064a6444949f089e20eec9a2e5506596494e4623"
 [[package]]
 name = "swadloon"
 version = "0.1.0"
-source = "git+https://www.github.com/nanoteck137/swadloon#ddc400b3f1402611379505ffb3e4c6ec2fa5ccd8"
+source = "git+https://www.github.com/nanoteck137/swadloon#6c456f2ecff08899663afca14868960055c5778b"
 dependencies = [
  "reqwest",
  "serde",
