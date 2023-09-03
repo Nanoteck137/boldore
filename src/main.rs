@@ -171,7 +171,8 @@ enum Commands {
 
     AddManga {
         query: String,
-        override_dir: Option<PathBuf>,
+        #[arg(short, long)]
+        add_to_current: bool,
     },
 }
 
@@ -505,7 +506,7 @@ fn main() {
 
         Commands::AddManga {
             query,
-            override_dir,
+            add_to_current
         } => {
             // TODO(patrik): Filter out results where malId == null
             let results = anilist::query(&query);
@@ -516,13 +517,9 @@ fn main() {
 
             let name = sanitize_name(&manga.name);
 
-            let dir = if let Some(override_dir) = override_dir {
-                assert!(
-                    !override_dir.exists(),
-                    "Directory doesn't exist: {:?}",
-                    override_dir
-                );
-                override_dir
+
+            let dir = if add_to_current {
+                std::env::current_dir().unwrap()
             } else {
                 let mut dir = base.clone();
                 dir.push(name);
