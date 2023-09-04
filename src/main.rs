@@ -161,6 +161,9 @@ struct Args {
     #[arg(short, long, value_name = "DIR")]
     dir: Option<PathBuf>,
 
+    #[arg(short, long, default_value = "1")]
+    threads: usize,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -343,6 +346,7 @@ fn fetch_chapters(
     paths: &Paths,
     manga: &mut Manga,
     missing_chapters: &[usize],
+    thread_count: usize,
 ) {
     if !paths.chapters_dir.is_dir() {
         std::fs::create_dir_all(&paths.chapters_dir).unwrap();
@@ -383,14 +387,13 @@ fn fetch_chapters(
     }
 
     println!("Thread Jobs: {}", thread_jobs.len());
+    println!("Using {} threads", thread_count);
 
     let queue = Arc::new(Mutex::new(thread_jobs));
 
-    const THREAD_COUNT: usize = 4;
-
     let mut threads = Vec::new();
 
-    for tid in 0..THREAD_COUNT {
+    for tid in 0..thread_count {
         let queue_handle = queue.clone();
         let handle = std::thread::spawn(move || {
             thread_worker(tid, queue_handle);
@@ -484,7 +487,12 @@ fn main() {
                 };
 
                 println!("Missing: {:?}", missing_chapters);
-                fetch_chapters(&paths, &mut manga, &missing_chapters);
+                fetch_chapters(
+                    &paths,
+                    &mut manga,
+                    &missing_chapters,
+                    args.threads,
+                );
 
                 let mut chapters = Vec::new();
 
@@ -507,7 +515,7 @@ fn main() {
 
         Commands::AddManga {
             query,
-            add_to_current
+            add_to_current,
         } => {
             // TODO(patrik): Filter out results where malId == null
             let results = anilist::query(&query);
@@ -517,7 +525,6 @@ fn main() {
             let manga = user_pick_manga(&results);
 
             let name = sanitize_name(&manga.name);
-
 
             let dir = if add_to_current {
                 std::env::current_dir().unwrap()
