@@ -329,6 +329,7 @@ fn thread_worker(tid: usize, queue: Arc<Mutex<VecDeque<ThreadJob>>>) {
         let ext = match content_type {
             "image/jpeg" => "jpeg",
             "image/png" => "png",
+            "image/gif" => "gif",
             _ => panic!("Unknown Content-Type '{}'", content_type),
         };
 
