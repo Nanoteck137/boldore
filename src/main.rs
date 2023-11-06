@@ -360,6 +360,7 @@ fn fetch_chapters(
         if let Some(mut chapter) = chapter {
             let mut chapter_dest = paths.chapters_dir.clone();
             chapter_dest.push(chapter.index.to_string());
+
             std::fs::create_dir_all(&chapter_dest).unwrap();
 
             if chapter.pages.is_none() {
@@ -500,33 +501,35 @@ fn main() {
                     let mut dir = paths.chapters_dir.clone();
                     dir.push(chapter.index.to_string());
 
-                    let read = dir.read_dir().unwrap();
-                    let mut res = read
-                        .map(|e| {
-                            let e = e.unwrap().path();
-                            let ext = e
-                                .extension()
-                                .unwrap()
-                                .to_str()
-                                .unwrap()
-                                .to_string();
-                            let page_num = e
-                                .file_stem()
-                                .unwrap()
-                                .to_str()
-                                .unwrap()
-                                .parse::<usize>()
-                                .unwrap();
+                    let mut dest = dir.clone();
+                    dest.push("name.txt");
 
-                            (page_num, ext)
-                        })
-                        .collect::<Vec<_>>();
-                    res.sort_by(|l, r| l.0.cmp(&r.0));
+                    std::fs::write(dest, &chapter.name).unwrap();
 
-                    let pages = res
-                        .into_iter()
-                        .map(|p| format!("{}.{}", p.0, p.1))
-                        .collect::<Vec<_>>();
+                    let pages = swadloon::get_sorted_pages(&dir);
+                    // let read = dir.read_dir().unwrap();
+                    // let mut res = read
+                    //     .map(|e| e.unwrap().path())
+                    //     .map(|e| {
+                    //         e.file_name()
+                    //             .unwrap()
+                    //             .to_str()
+                    //             .unwrap()
+                    //             .to_string()
+                    //     })
+                    //     .filter(|e| e.as_str() != "name.txt")
+                    //     .map(|e| {
+                    //         let (page_num, _) = e.split_once(".").unwrap();
+                    //
+                    //         (page_num.parse::<usize>().unwrap(), e)
+                    //     })
+                    //     .collect::<Vec<_>>();
+                    // res.sort_by(|l, r| l.0.cmp(&r.0));
+                    //
+                    // let pages = res
+                    //     .into_iter()
+                    //     .map(|p| format!("{}.{}", p.0, p.1))
+                    //     .collect::<Vec<_>>();
 
                     chapters.push(ChapterMetadata {
                         index: chapter.index,
@@ -590,51 +593,8 @@ fn main() {
             let s = serde_json::to_string_pretty(&metadata).unwrap();
             write_to_file(&metadata_file, &s);
 
-            let cover = swadloon::download_image(
-                "cover",
-                &metadata.cover_image.extra_large,
-                &images_dir,
-            );
-
-            let cover =
-                cover.file_name().unwrap().to_str().unwrap().to_string();
-
-            let convert_date = |date: swadloon::anilist::MetadataDate| {
-                let date = iso8601::Date::YMD {
-                    year: date.year.unwrap_or(0) as i32,
-                    month: date.month.unwrap_or(0) as u32,
-                    day: date.day.unwrap_or(0) as u32,
-                };
-
-                let date = iso8601::DateTime {
-                    date,
-                    time: iso8601::Time::default(),
-                };
-
-                date.to_string()
-            };
-
-            let start_date = convert_date(metadata.start_date);
-            let end_date = convert_date(metadata.end_date);
-
             let id = swadloon::gen_manga_id();
-            let meta = MangaMetadata {
-                id,
-                title: metadata.title.english.unwrap_or(metadata.title.romaji),
-                cover,
-
-                description: metadata.description,
-
-                anilist_id: metadata.id,
-                mal_id: metadata.mal_id.unwrap(),
-
-                status: metadata.status,
-
-                start_date,
-                end_date,
-
-                chapters: Vec::new(),
-            };
+            let meta = swadloon::metadata_from_anilist(&dir, metadata, id);
 
             let s = serde_json::to_string_pretty(&meta).unwrap();
             write_to_file(&manga_metadata_file, &s);
