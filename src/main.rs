@@ -14,7 +14,7 @@ use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use swadloon::{
     anilist::{self, fetch_anilist_metadata},
-    ChapterEntry,
+    ChapterMetadata, MangaMetadata,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -410,19 +410,19 @@ fn fetch_chapters(
 
 struct Paths {
     chapters_dir: PathBuf,
-    chapters_metadata: PathBuf,
+    manga_metadata: PathBuf,
 }
 
 fn create_paths(manga_dir: &PathBuf) -> Paths {
     let mut chapters_dir = manga_dir.clone();
     chapters_dir.push("chapters");
 
-    let mut chapters_metadata = manga_dir.clone();
-    chapters_metadata.push("chapters.json");
+    let mut manga_metadata = manga_dir.clone();
+    manga_metadata.push("manga.json");
 
     Paths {
         chapters_dir,
-        chapters_metadata,
+        manga_metadata,
     }
 }
 
@@ -455,18 +455,20 @@ fn main() {
                 println!("Fetch {:?}", path);
                 let paths = create_paths(&path);
 
+                let s =
+                    std::fs::read_to_string(&paths.manga_metadata).unwrap();
+                let mut metadata =
+                    serde_json::from_str::<MangaMetadata>(&s).unwrap();
+
                 let mut manga = fetch_mangapill(mangapill.id);
 
-                let missing_chapters = if paths.chapters_metadata.is_file() {
-                    let s = std::fs::read_to_string(&paths.chapters_metadata)
-                        .unwrap();
-                    let chapters =
-                        serde_json::from_str::<Vec<ChapterEntry>>(&s).unwrap();
-
+                let missing_chapters = {
                     let mut missing = Vec::new();
                     for chapter in manga.chapters.iter() {
-                        let res =
-                            chapters.iter().find(|i| i.index == chapter.index);
+                        let res = metadata
+                            .chapters
+                            .iter()
+                            .find(|i| i.index == chapter.index);
                         if res.is_none() {
                             missing.push(chapter.index);
                         }
@@ -477,13 +479,11 @@ fn main() {
                         path.push(missing.to_string());
 
                         if path.is_dir() {
-                            panic!("Chapter '{}' is not declared in 'chapters.json' but exists as an directory", missing);
+                            panic!("Chapter '{}' is not declared in 'manga.json' but exists as an directory", missing);
                         }
                     }
 
                     missing
-                } else {
-                    manga.chapters.iter().map(|i| i.index).collect::<Vec<_>>()
                 };
 
                 println!("Missing: {:?}", missing_chapters);
@@ -497,19 +497,48 @@ fn main() {
                 let mut chapters = Vec::new();
 
                 for chapter in manga.chapters.iter() {
-                    chapters.push(ChapterEntry {
+                    let mut dir = paths.chapters_dir.clone();
+                    dir.push(chapter.index.to_string());
+
+                    let read = dir.read_dir().unwrap();
+                    let mut res = read
+                        .map(|e| {
+                            let e = e.unwrap().path();
+                            let ext = e
+                                .extension()
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .to_string();
+                            let page_num = e
+                                .file_stem()
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .parse::<usize>()
+                                .unwrap();
+
+                            (page_num, ext)
+                        })
+                        .collect::<Vec<_>>();
+                    res.sort_by(|l, r| l.0.cmp(&r.0));
+
+                    let pages = res
+                        .into_iter()
+                        .map(|p| format!("{}.{}", p.0, p.1))
+                        .collect::<Vec<_>>();
+
+                    chapters.push(ChapterMetadata {
                         index: chapter.index,
                         name: chapter.name.clone(),
-                        page_count: chapter
-                            .pages
-                            .as_ref()
-                            .map(|i| i.len())
-                            .unwrap_or(0),
+                        pages,
                     });
                 }
 
-                let s = serde_json::to_string_pretty(&chapters).unwrap();
-                write_to_file(&paths.chapters_metadata, &s);
+                metadata.chapters = chapters;
+
+                let s = serde_json::to_string_pretty(&metadata).unwrap();
+                write_to_file(&paths.manga_metadata, &s);
             }
         }
 
@@ -544,12 +573,71 @@ fn main() {
             let mut metadata_file = dir.clone();
             metadata_file.push("metadata.json");
 
+            let mut manga_metadata_file = dir.clone();
+            manga_metadata_file.push("manga.json");
+
             let mut mangapill_file = dir.clone();
             mangapill_file.push("mangapill.json");
+
+            let mut images_dir = dir.clone();
+            images_dir.push("images");
+
+            if !images_dir.exists() {
+                std::fs::create_dir_all(&images_dir).unwrap();
+            }
 
             let metadata = fetch_anilist_metadata(anilist.mal_id.unwrap());
             let s = serde_json::to_string_pretty(&metadata).unwrap();
             write_to_file(&metadata_file, &s);
+
+            let cover = swadloon::download_image(
+                "cover",
+                &metadata.cover_image.extra_large,
+                &images_dir,
+            );
+
+            let cover =
+                cover.file_name().unwrap().to_str().unwrap().to_string();
+
+            let convert_date = |date: swadloon::anilist::MetadataDate| {
+                let date = iso8601::Date::YMD {
+                    year: date.year.unwrap_or(0) as i32,
+                    month: date.month.unwrap_or(0) as u32,
+                    day: date.day.unwrap_or(0) as u32,
+                };
+
+                let date = iso8601::DateTime {
+                    date,
+                    time: iso8601::Time::default(),
+                };
+
+                date.to_string()
+            };
+
+            let start_date = convert_date(metadata.start_date);
+            let end_date = convert_date(metadata.end_date);
+
+            let id = swadloon::gen_manga_id();
+            let meta = MangaMetadata {
+                id,
+                title: metadata.title.english.unwrap_or(metadata.title.romaji),
+                cover,
+
+                description: metadata.description,
+
+                anilist_id: metadata.id,
+                mal_id: metadata.mal_id.unwrap(),
+
+                status: metadata.status,
+
+                start_date,
+                end_date,
+
+                chapters: Vec::new(),
+            };
+
+            let s = serde_json::to_string_pretty(&meta).unwrap();
+            write_to_file(&manga_metadata_file, &s);
 
             let mangapill = Mangapill { id: manga.id };
 
